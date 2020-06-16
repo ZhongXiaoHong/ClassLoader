@@ -61,8 +61,209 @@ apk安装的时候会利用dex2oat工具，将dex文件编译成本地机器码�
 
 应用安装时不作AOT,运行过程中解释执行，对经常调用的方法进行JIT,经过JIT编译的方法会记录到profile配置文件中，在手机充电等有空闲的场景下，编译守护进程会运行，根据profile文件对常用代码进行AOT编译生成art文件，待下次运行直接使用
 
+JIT编译的代码只有本次运行有效，程序退出就没了
+art.odex是机器码，dalvik的odex是dex
 
-28：10
+
+> android ClassLoader的继承树
+
+![](https://github.com/ZhongXiaoHong/ClassLoader/blob/master/6176666668888888888.jpg)
+
+比如：
+Activity的ClassLoader是BootClassLoader
+AppCompatActivity的ClassLoader是PathClassLoader，因为AppCompatActivity是兼容包的类，不是Framwork中的类
+
+
+> PathClassLoader是如何加载类的
+
+PathClassLoader通过loadClass方法加载，这个方法来自父类的父类ClassLoader
+
+```java
+
+    
+   protected Class<?> loadClass(String name, boolean resolve)
+        throws ClassNotFoundException
+    {
+            // First, check if the class has already been loaded
+            //TODO 找缓存
+            Class<?> c = findLoadedClass(name);
+            if (c == null) {
+                try {
+                    if (parent != null) {
+                    //TODO parent 也是ClassLoader 到底是具体类型呢？
+                    //parent 是ClassLoader对象一个属性也是ClassLoader类型
+                    //这里调用loadClass前，先调用parent的loadClass,可想而知，parent里面又会调用parent的parent的loadClass
+                    //这是责任链模式,
+                    //对于PathClassLoader 这个parent是谁呢？实际上是BootClassLoader而不是BaseDexClassLoader,
+                    //BaseDexClassLoader是在继承关系上是PathClassLoader的直接父类，这里不能被parent这个命名误导，就认为是类的父类
+                    //这里直接把parent理解成一个普通变量，是ClassLoader类型，是创建ClassLoader对象是外界传进来的
+                    //系统创建PathClassLoader时传进来的是BootClassLoader
+                        c = parent.loadClass(name, false);
+                    } else {
+                        c = findBootstrapClassOrNull(name);
+                    }
+                } catch (ClassNotFoundException e) {
+                    // ClassNotFoundException thrown if class not found
+                    // from the non-null parent class loader
+                }
+
+                if (c == null) {
+                    // If still not found, then invoke findClass in order
+                    // to find the class.
+                    //TODO  parent加载不到再自己加载，这个机制叫做双亲委托机制
+                    c = findClass(name);
+                }
+            }
+            return c;
+            
+ 
+ 
+ protected Class<?> findClass(String name) throws ClassNotFoundException {
+        List<Throwable> suppressedExceptions = new ArrayList<Throwable>();
+        //TODO  从DexPathList查找,详细怎么查找见下文
+        Class c = pathList.findClass(name, suppressedExceptions);
+        if (c == null) {
+            ClassNotFoundException cnfe = new ClassNotFoundException(
+                    "Didn't find class \"" + name + "\" on path: " + pathList);
+            for (Throwable t : suppressedExceptions) {
+                cnfe.addSuppressed(t);
+            }
+            throw cnfe;
+        }
+        return c;
+    }
+    
+
+```
+
+> 双亲委托机制的作用
+1.安全：防止核心API库被篡改，如果没有双亲委托机制，即去除  c = parent.loadClass(name, false)直接自己loadClass是不安全的，比如说开发者自己定义了一个String类包名类名和系统的String类完全相同，这个时候调用加载的时候就只会加载自己编写的String类，系统的String就不会被调用，自己编写的String类就顶替了系统的String，就相当于系统核心APi被篡改了，如果有双亲委托机制这种情况就不会出现，BootClassLoader首先加载系统的String类直接返回了，自己编写的String没机会被加载。
+2.避免重复加载：当父类加载器已经加载过该类的时候，就没有必要子ClassLoader在加载一次
+
+> 为什么PathClassLoader可以加载应用程序的类
+```
+  public PathClassLoader(String dexPath, ClassLoader parent) {
+        super(dexPath, null, null, parent);
+    }
+```
+可以看到在创建PathClassLoader的时候会传一个dexPath地址，这个就是应用程序的dex路径，根据这个地址就可以加载到。
+
+> 理解DexPathList
+```java
+  public BaseDexClassLoader(String dexPath, File optimizedDirectory,
+            String librarySearchPath, ClassLoader parent, boolean isTrusted) {
+        super(parent);
+        this.pathList = new DexPathList(this, dexPath, librarySearchPath, null, isTrusted);
+
+        if (reporter != null) {
+            reportClassLoaderChain();
+        }
+    }
+```
+DexPathList在BaseDexClassLoader构造方法中被创建
+
+```java
+     DexPathList(ClassLoader definingContext, String dexPath,
+            String librarySearchPath, File optimizedDirectory, boolean isTrusted) {
+        if (definingContext == null) {
+            throw new NullPointerException("definingContext == null");
+        }
+
+        if (dexPath == null) {
+            throw new NullPointerException("dexPath == null");
+        }
+
+        if (optimizedDirectory != null) {
+            if (!optimizedDirectory.exists())  {
+                throw new IllegalArgumentException(
+                        "optimizedDirectory doesn't exist: "
+                        + optimizedDirectory);
+            }
+
+            if (!(optimizedDirectory.canRead()
+                            && optimizedDirectory.canWrite())) {
+                throw new IllegalArgumentException(
+                        "optimizedDirectory not readable/writable: "
+                        + optimizedDirectory);
+            }
+        }
+
+        this.definingContext = definingContext;
+
+        ArrayList<IOException> suppressedExceptions = new ArrayList<IOException>();
+        // save dexPath for BaseDexClassLoader
+        //TODO spliDexPath回对dexPath分离，比如说当要加载a、b两个dex的时候，dexPath的值
+        //TODO 就是这样传值 /a/a.dex:/a/b.dex,所以通过spliDexPath可以分离出每个要加载的dex的路径
+        //TODO 调用makeDexElement生成Element数组，一个dex生成一个Element
+        //TODO 所以这里就是将dex包装成一个Element
+        this.dexElements = makeDexElements(splitDexPath(dexPath), optimizedDirectory,
+                                           suppressedExceptions, definingContext, isTrusted);
+
+        // Native libraries may exist in both the system and
+        // application library paths, and we use this search order:
+        //
+        //   1. This class loader's library path for application libraries (librarySearchPath):
+        //   1.1. Native library directories
+        //   1.2. Path to libraries in apk-files
+        //   2. The VM's library path from the system property for system libraries
+        //      also known as java.library.path
+        //
+        // This order was reversed prior to Gingerbread; see http://b/2933456.
+        this.nativeLibraryDirectories = splitPaths(librarySearchPath, false);
+        this.systemNativeLibraryDirectories =
+                splitPaths(System.getProperty("java.library.path"), true);
+        List<File> allNativeLibraryDirectories = new ArrayList<>(nativeLibraryDirectories);
+        allNativeLibraryDirectories.addAll(systemNativeLibraryDirectories);
+
+        this.nativeLibraryPathElements = makePathElements(allNativeLibraryDirectories);
+
+        if (suppressedExceptions.size() > 0) {
+            this.dexElementsSuppressedExceptions =
+                suppressedExceptions.toArray(new IOException[suppressedExceptions.size()]);
+        } else {
+            dexElementsSuppressedExceptions = null;
+        }
+    
+    
+```
+
+> ClassLoader自己加载类是如何加载的
+```java
+
+ protected Class<?> findClass(String name) throws ClassNotFoundException {
+        List<Throwable> suppressedExceptions = new ArrayList<Throwable>();
+        //TODO  从DexPathList查找,
+        Class c = pathList.findClass(name, suppressedExceptions);
+        if (c == null) {
+            ClassNotFoundException cnfe = new ClassNotFoundException(
+                    "Didn't find class \"" + name + "\" on path: " + pathList);
+            for (Throwable t : suppressedExceptions) {
+                cnfe.addSuppressed(t);
+            }
+            throw cnfe;
+        }
+        return c;
+    }
+    
+    
+      public Class<?> findClass(String name, List<Throwable> suppressed) {
+        for (Element element : dexElements) {
+        //TODO 遍历每一个Element查找要加载的类
+            Class<?> clazz = element.findClass(name, definingContext, suppressed);
+            if (clazz != null) {
+                return clazz;
+            }
+        }
+
+        if (dexElementsSuppressedExceptions != null) {
+            suppressed.addAll(Arrays.asList(dexElementsSuppressedExceptions));
+        }
+        return null;
+    }
+    
+```
+
+2-----17：36
 
 
 
