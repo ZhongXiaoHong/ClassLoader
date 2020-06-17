@@ -139,6 +139,7 @@ PathClassLoader通过loadClass方法加载，这个方法来自父类的父类Cl
 > 双亲委托机制的作用
 
 1.安全：防止核心API库被篡改，如果没有双亲委托机制，即去除  c = parent.loadClass(name, false)直接自己loadClass是不安全的，比如说开发者自己定义了一个String类包名类名和系统的String类完全相同，这个时候调用加载的时候就只会加载自己编写的String类，系统的String就不会被调用，自己编写的String类就顶替了系统的String，就相当于系统核心APi被篡改了，如果有双亲委托机制这种情况就不会出现，BootClassLoader首先加载系统的String类直接返回了，自己编写的String没机会被加载。
+
 2.避免重复加载：当父类加载器已经加载过该类的时候，就没有必要子ClassLoader在加载一次
 
 > 为什么PathClassLoader可以加载应用程序的类
